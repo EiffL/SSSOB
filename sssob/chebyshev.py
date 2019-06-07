@@ -40,7 +40,7 @@ def ChebyshevCoefficients(operator, a, b, n):
     return c
 
 
-def StochasticChebyshevTrace(operator, shape, coeffs):
+def StochasticChebyshevTrace(operator,grad_operator, shape, coeffs):
     """
     Computes the trace of the Chebyshev expansion of the function defined by
     `coeffs` and applied to `operator`, using the Hutchinson estimator
@@ -57,18 +57,28 @@ def StochasticChebyshevTrace(operator, shape, coeffs):
 
     # Initialize the iteration
     w0, w1 = v, operator(v)
+    gw0 = 0*grad_operator(v)
+    gw1 = grad_operator(v)
 
-    s = 0.5*coeffs[0]*w0 + coeffs[1]*w1
+    s  = 0.5*coeffs[0]*w0  + coeffs[1]*w1
+    gs = 0.5*coeffs[0]*gw0 + coeffs[1]*gw1
 
     for i in range(2, coeffs.shape[0]):
         wi = 2.*operator(w1) - w0
         s = s + coeffs[i]*wi
+
+        gwi = 2.*grad_operator(w1) + 2*operator(gw1) - gw0
+        gs = gs + coeffs[i]*gwi
+
         w0=w1*1.0
         w1=wi*1.0
+        gw0=gw1*1.0
+        gw1=gwi*1.0
 
-    return v.T.dot(s)
+    return v.T.dot(s), v.T.dot(gs)
 
-def chebyshev_spectral_sum(func, operator, a, b, shape, deg=20):
+def chebyshev_logdet(operator, grad_operator, shape, deg=20, num_iters=20,
+                     g=1.1, eps=1e-6, m=100):
     """
     Computes the spectral sum tr(f(A)), where A is the operator,
     f is the func, [a, b] is the range of eigenvalues of A.
@@ -78,30 +88,8 @@ def chebyshev_spectral_sum(func, operator, a, b, shape, deg=20):
     m: Number of random vectors to probe the trace
 
     This corresponds to Algorithm 1 in Han et al. 2017
-    """
 
-    # Compute the chebyshev coefficients of the operator
-    c = ChebyshevCoefficients(func, a, b, deg)
-
-    # Rescales the operator
-    def scaled_op(x):
-        return 2. * operator(x) / (b - a) - (b + a)/(b - a) * x
-
-    Gamma = StochasticChebyshevTrace(scaled_op, shape=shape, coeffs=c)
-
-    return Gamma
-
-
-def chebyshev_logdet(operator, shape, deg=20, num_iters=10, g=1.1, eps=1e-6, m=100):
-    """
-    Computes the spectral sum tr(f(A)), where A is the operator,
-    f is the func, [a, b] is the range of eigenvalues of A.
-
-    shape: Shape of input vectors to the operator, typically [batch, d]
-    deg: Degree of the Chebyshev approximation
-    m: Number of random vectors to probe the trace
-
-    This corresponds to Algorithm 1 in Han et al. 2017
+    Returns the logdet, as well as the gradient
     """
     # Find the largest eigenvalue amongst the batch
     lmax = eigen_max(operator, shape, num_iters)
@@ -110,6 +98,9 @@ def chebyshev_logdet(operator, shape, deg=20, num_iters=10, g=1.1, eps=1e-6, m=1
     # Rescales the operator
     def scaled_op(x):
         return operator(x) / (a+b)
+
+    def scaled_gop(x):
+        return grad_operator(x) / (a+b)
 
     a1 = a / (a + b)
     b1 = b / (a + b)
@@ -121,8 +112,14 @@ def chebyshev_logdet(operator, shape, deg=20, num_iters=10, g=1.1, eps=1e-6, m=1
     def scaled_op1(x):
         return 2. * scaled_op(x) / (b1 - a1) - (b1 + a1)/(b1 - a1) * x
 
+    def scaled_gop1(x):
+        return 2. * scaled_gop(x) / (b1 - a1)
+
     res = []
+    resg = []
     for i in range(m):
-        Gamma = StochasticChebyshevTrace(scaled_op1, shape=shape, coeffs=c)
-        res.append( Gamma + shape[0]*np.log(a+b))
-    return np.concatenate(res)
+        Gamma, grad_Gamma = StochasticChebyshevTrace(scaled_op1, scaled_gop1, shape=shape, coeffs=c)
+        res.append( Gamma + shape[0]*np.log(a1+b1))
+        resg.append(grad_Gamma)
+
+    return np.concatenate(res), np.concatenate(resg)
